@@ -2,6 +2,7 @@
   inputs = {
     # nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     systems.url = "github:nix-systems/default";
+    rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
   outputs =
@@ -10,16 +11,21 @@
       nixpkgs,
       flake-utils,
       systems,
+      rust-overlay,
     }:
     flake-utils.lib.eachSystem (import systems) (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs {
+            inherit system overlays;
+        };
       in
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            cargo
+            rust-bin.stable.latest.default
+            rust-analyzer
           ];
         };
       }

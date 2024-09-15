@@ -4,3 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = { version = "1.0.88", features = ["std", "backtrace"] }
+crossbeam = "0.8.4"
+log = "0.4.22"
+num-traits = "0.2.19"
+rand = "0.8.5"
+rkyv = "0.8.3"
+swing = "0.1.0"
