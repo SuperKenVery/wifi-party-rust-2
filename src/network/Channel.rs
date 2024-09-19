@@ -4,6 +4,7 @@ use anyhow::Error as AnyError;
 use crossbeam::channel::{bounded, Receiver, Sender, TrySendError};
 use log::{info, trace, warn};
 use rkyv::rancor::Error;
+use std::cell::RefCell;
 use std::collections::{hash_map::HashMap, VecDeque};
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
@@ -15,16 +16,16 @@ struct Channel {
     // Receive states
     rcv_buf_tx: Sender<AudioBuffer>,
     rcv_buf_rx: Receiver<AudioBuffer>,
-    left_over: Option<AudioBuffer>,
-    left_read_idx: usize, // Left-over buffer from last read, how much have been read in last read
-    last_cont_idx: Mutex<i32>, // Last continuous index
-    last_recv_idx: Mutex<i32>, // The max index we received
-    next_read_idx: Mutex<i32>, // Next index to read
+    left_over: Mutex<Option<AudioBuffer>>,
+    left_read_idx: Mutex<usize>, // Left-over buffer from last read, how much have been read in last read
+    last_cont_idx: Mutex<i32>,   // Last continuous index
+    last_recv_idx: Mutex<i32>,   // The max index we received
+    next_read_idx: Mutex<i32>,   // Next index to read
     ofo_buf: Mutex<HashMap<i32, AudioBuffer>>, // Out-of-order buffer
 
     // Send states
     socket: Arc<UdpSocket>,
-    seq: i32,
+    seq: Mutex<i32>,
 }
 
 impl Channel {
@@ -35,14 +36,14 @@ impl Channel {
             id,
             rcv_buf_rx: rx,
             rcv_buf_tx: tx,
-            left_over: None,
-            left_read_idx: 0,
+            left_over: Mutex::new(None),
+            left_read_idx: Mutex::new(0),
             last_cont_idx: Mutex::new(-1),
             last_recv_idx: Mutex::new(-1),
             next_read_idx: Mutex::new(0),
             ofo_buf: Mutex::new(HashMap::new()),
             socket,
-            seq: 0,
+            seq: Mutex::new(0),
         }
     }
 
@@ -80,7 +81,7 @@ impl Channel {
     }
 
     // Receive audio from channel
-    pub fn receive(&mut self, idx: i32, audio: AudioBuffer) {
+    pub fn receive(&self, idx: i32, audio: AudioBuffer) {
         let mut last_cont_idx = self.last_cont_idx.lock().unwrap();
         let mut last_recv_idx = self.last_recv_idx.lock().unwrap();
         let next_read_idx = self.next_read_idx.lock().unwrap();
@@ -142,27 +143,32 @@ impl Channel {
         }
     }
 
-    pub fn read(&mut self, size: usize) -> AudioBuffer {
+    pub fn read(&self, size: usize) -> AudioBuffer {
         let mut need_read = size;
         let mut buf = AudioBuffer::new_with_capacity(size as usize);
         trace!("Requested to read {} samples from channel", size);
 
         // Read from left-over buffer
         let mut next_read_idx = self.next_read_idx.lock().unwrap();
-        if let Some(audio) = &self.left_over {
-            let audio_len = audio.buf.len() - self.left_read_idx;
+        let mut left_over = self.left_over.lock().unwrap();
+        let mut left_read_idx = self.left_read_idx.lock().unwrap();
+        if let Some(audio) = &*left_over {
+            let audio_len = audio.buf.len() - *left_read_idx;
             if audio_len > need_read {
-                trace!("Reading {} samples from left-over buffer", need_read);
-                buf.buf.extend_from_slice(
-                    &audio.buf[self.left_read_idx..self.left_read_idx + need_read],
+                trace!(
+                    "Reading {}/{} samples from left-over buffer",
+                    need_read,
+                    audio_len
                 );
-                self.left_read_idx += need_read;
+                buf.buf
+                    .extend_from_slice(&audio.buf[*left_read_idx..*left_read_idx + need_read]);
+                *left_read_idx += need_read;
                 need_read = 0;
             } else {
-                trace!("Reading {} samples from left-over buffer", audio_len);
-                buf.buf.extend_from_slice(&audio.buf[self.left_read_idx..]);
+                trace!("Reading all {} samples from left-over buffer", audio_len);
+                buf.buf.extend_from_slice(&audio.buf[*left_read_idx..]);
                 need_read -= audio_len;
-                self.left_over = None;
+                *left_over = None;
                 *next_read_idx += 1;
             }
         }
@@ -186,8 +192,8 @@ impl Channel {
                         audio.buf.len() - need_read
                     );
                     buf.buf.extend_from_slice(&audio.buf[0..need_read]);
-                    self.left_over = Some(audio);
-                    self.left_read_idx = need_read;
+                    *left_over = Some(audio);
+                    *left_read_idx = need_read;
                     need_read = 0;
                     break;
                 } else {
@@ -231,8 +237,8 @@ impl Channel {
                         audio.buf.len() - need_read
                     );
                     buf.buf.extend_from_slice(&audio.buf[0..need_read]);
-                    self.left_over = Some(audio);
-                    self.left_read_idx = need_read;
+                    *left_over = Some(audio);
+                    *left_read_idx = need_read;
                     need_read = 0;
                     break;
                 } else {
@@ -281,14 +287,16 @@ impl Channel {
     // === Audio sending ===
 
     // Send audio to channel
-    fn send(&mut self, audio: AudioBuffer) -> Result<(), AnyError> {
+    fn send(&self, audio: AudioBuffer) -> Result<(), AnyError> {
+        let mut seq = self.seq.lock().unwrap();
+
         let packet = Packet {
             channel_id: self.id,
-            seq: self.seq,
+            seq: *seq,
             audio,
         };
 
-        self.seq += 1;
+        *seq += 1;
 
         let bytes = rkyv::to_bytes::<Error>(&packet)?;
         self.socket.send(&bytes)?;
@@ -303,9 +311,10 @@ mod test {
     use crate::config::{AudioBuffer, QUEUE_SIZE, SAMPLE_RATE};
     use crate::config::{MCAST_ADDR, PORT};
     use anyhow::Error as AnyError;
-    use log::LevelFilter;
+    use log::{info, LevelFilter};
     use rand::seq::SliceRandom;
     use rand::{self, Rng};
+    use std::borrow::Borrow;
     use std::{
         net::{Ipv4Addr, UdpSocket},
         sync::Arc,
@@ -384,7 +393,7 @@ mod test {
         Ok(())
     }
 
-    fn check_read_chunk(test_len: usize, channel: &mut Channel) -> Result<(), AnyError> {
+    fn check_read_chunk(test_len: usize, channel: &Channel) -> Result<(), AnyError> {
         let mut counter = 0;
         let mut left_len = test_len;
         let mut rng = rand::thread_rng();
@@ -409,7 +418,7 @@ mod test {
         Ok(())
     }
 
-    fn feed_audio_samples(channel: &mut Channel, samples: Vec<(i32, AudioBuffer)>) {
+    fn feed_audio_samples(channel: &Channel, samples: Vec<(i32, AudioBuffer)>) {
         for (idx, audio) in samples {
             channel.receive(idx, audio);
         }
@@ -417,11 +426,11 @@ mod test {
 
     #[test]
     fn single_thread_recv_continuous() -> Result<(), AnyError> {
-        let (_socket, mut channel) = setup()?;
+        let (_socket, channel) = setup()?;
         let test_len = 114514;
 
         let samples = gen_samples(test_len);
-        feed_audio_samples(&mut channel, samples);
+        feed_audio_samples(&channel, samples);
 
         check_read_cont(test_len, channel.read(test_len))?;
 
@@ -437,9 +446,56 @@ mod test {
 
         let mut rng = rand::thread_rng();
         samples.shuffle(&mut rng);
-        feed_audio_samples(&mut channel, samples);
+        feed_audio_samples(&channel, samples);
 
         check_read_chunk(test_len, &mut channel)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_thread_recv_random() -> Result<(), AnyError> {
+        let (_socket, channel) = setup()?;
+        let channel = Arc::new(channel);
+        let test_len = 114514;
+        let worker_num = 8;
+
+        let mut samples = gen_samples(test_len);
+
+        let mut rng = rand::thread_rng();
+        samples.shuffle(&mut rng);
+
+        let worker_samples = (0..worker_num)
+            .map(|worker_idx| {
+                let mut result = Vec::new();
+                for i in (worker_idx..samples.len()).step_by(worker_num) {
+                    let (idx, audio) = samples[i].clone();
+                    result.push((idx, audio));
+                }
+                result
+            })
+            .collect::<Vec<_>>();
+
+        for (i, samples) in worker_samples.iter().enumerate() {
+            let idxs = samples.iter().map(|(idx, _)| *idx).collect::<Vec<_>>();
+            info!("Worker {}: {:?}", i, idxs)
+        }
+
+        let workers: Vec<_> = worker_samples
+            .into_iter()
+            .map(|samples| {
+                let channel = channel.clone();
+                std::thread::spawn(move || {
+                    feed_audio_samples(&*channel, samples);
+                })
+            })
+            .collect();
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        check_read_chunk(test_len, &*channel)?;
 
         Ok(())
     }

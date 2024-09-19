@@ -7,7 +7,7 @@ pub static MCAST_ADDR: &str = "225.23.134.210";
 
 type AudioSample = u8;
 
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub struct AudioBuffer {
     pub buf: Vec<AudioSample>,
