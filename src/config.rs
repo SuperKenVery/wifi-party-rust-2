@@ -1,11 +1,12 @@
 use rkyv::{deserialize, rancor::Error, Archive, Deserialize, Serialize};
 
-pub static SAMPLE_RATE: i32 = 44100;
-pub static QUEUE_SIZE: usize = 256;
-pub static PORT: u16 = 3487;
-pub static MCAST_ADDR: &str = "225.23.134.210";
-
 type AudioSample = u8;
+
+pub const SAMPLE_RATE: i32 = 44100;
+pub const QUEUE_SIZE: usize = 256;
+pub const PORT: u16 = 3487;
+pub const MCAST_ADDR: &str = "225.23.134.210";
+pub const RECV_BUF_SIZE: usize = (SAMPLE_RATE as usize) * size_of::<AudioSample>(); // 1 sec of audio
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
 #[rkyv(compare(PartialEq), derive(Debug))]

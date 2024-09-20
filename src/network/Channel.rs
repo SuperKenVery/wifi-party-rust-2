@@ -1,4 +1,4 @@
-use super::Packet::Packet;
+use super::packet::Packet;
 use crate::config::{AudioBuffer, MCAST_ADDR, PORT, QUEUE_SIZE};
 use anyhow::Error as AnyError;
 use crossbeam::channel::{bounded, Receiver, Sender, TrySendError};
@@ -9,9 +9,9 @@ use std::collections::{hash_map::HashMap, VecDeque};
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 
-struct Channel {
+pub struct Channel {
     // Channel properties
-    id: i32,
+    pub id: i32,
 
     // Receive states
     rcv_buf_tx: Sender<AudioBuffer>,
